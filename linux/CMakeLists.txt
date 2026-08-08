@@ -46,9 +46,24 @@ else()
   # The upstream Linux build only defines ARCH_X86_64
   # (enable_default_linux_architectures in ffmpeg-kit); there is no aarch64
   # plumbing in linux.sh, so no other architecture can be served yet.
-  message(FATAL_ERROR
-    "ffmpeg_kit_flutter: Linux is x86_64-only, got '${CMAKE_SYSTEM_PROCESSOR}'. "
-    "Build a bundle for this architecture and point FFMPEGKIT_LOCAL_DIR at it.")
+  set(FFMPEGKIT_ARCH "")
+endif()
+
+# No prebuilt bundle for this architecture and no locally-built one supplied: build the
+# plugin without native ffmpeg rather than failing configuration outright. libffmpegkit.so
+# is dlopen()ed lazily and load_native_library() already reports a clean error when it is
+# absent, so the embedder can fall back to a system ffmpeg binary instead of losing the
+# whole build.
+#
+# Deliberately checked before FFMPEGKIT_LOCAL_DIR is declared below: an undefined variable
+# evaluates false, while a -D on the command line or a cached value is already set by this
+# point, so "user supplied a bundle" and "user supplied nothing" both resolve correctly.
+if(NOT FFMPEGKIT_ARCH AND NOT FFMPEGKIT_LOCAL_DIR AND NOT DEFINED ENV{FFMPEGKIT_LOCAL_DIR})
+  message(WARNING
+    "ffmpeg_kit_flutter: no Linux bundle for '${CMAKE_SYSTEM_PROCESSOR}' -- building "
+    "without native ffmpeg. Set FFMPEGKIT_LOCAL_DIR to supply your own.")
+  set(ffmpeg_kit_flutter_new_min_bundled_libraries "" PARENT_SCOPE)
+  return()
 endif()
 
 # Unpack into the app's build tree, NOT the plugin source directory. When the
