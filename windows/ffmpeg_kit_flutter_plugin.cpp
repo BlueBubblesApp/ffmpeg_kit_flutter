@@ -147,10 +147,8 @@ FFmpegKitFlutterPlugin::~FFmpegKitFlutterPlugin() {
     }
     UnregisterClassW(kMsgWindowClass, GetModuleHandle(nullptr));
     event_sink_owner_.reset();
-    if (lib_) {
-        FreeLibrary(lib_);
-        lib_ = nullptr;
-    }
+    // lib_ is deliberately never freed: FFmpeg's pthread workers can outlive the plugin, and unloading
+    // libffmpegkit also unmaps libwinpthread under them, crashing the process on exit.
 }
 
 void FFmpegKitFlutterPlugin::EnqueueEvent(flutter::EncodableValue event) {
