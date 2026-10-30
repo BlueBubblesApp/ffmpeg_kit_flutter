@@ -90,7 +90,7 @@ message(STATUS "FFmpegKit prebuilt dir: ${FFMPEGKIT_PREBUILT_DIR} (arch: ${FFMPE
 # with NO external libraries and no GPL components. The variant name is an
 # emergent property of that (empty) library set (see windows/src/Packages.cpp).
 #   * The CANONICAL min build (reports "min") is produced by
-#     ffmpeg-kit/build-windows-min.sh — consume a self-built bundle by setting
+#     `FFMPEGKIT_VARIANT=min ./windows.sh` in ffmpeg-kit — consume a self-built bundle by setting
 #     FFMPEGKIT_LOCAL_DIR.
 # min contains no GPL components and stays under the default LGPL 3.0 license.
 set(FFMPEGKIT_PACKAGE "min" CACHE STRING "FFmpegKit variant: min, min-gpl, full, full-gpl, https, ...")
@@ -120,6 +120,25 @@ if(FFMPEGKIT_LOCAL_DIR)
 else()
   set(FFMPEGKIT_WANT "${FFMPEGKIT_RELEASE_TAG}")
 endif()
+# Legacy workaround, off by default: rebase the bundled DLLs below 4 GB and
+# clear DYNAMIC_BASE/HIGH_ENTROPY_VA on them. See the comment where it applies.
+option(FFMPEGKIT_DISABLE_ASLR "Rebase the bundled DLLs and turn off ASLR on them (needs MSVC editbin)" OFF)
+# Like FFMPEGKIT_LOCAL_DIR it can also come from the environment, since
+# `flutter build windows` does not forward -D options. When set, it overrides
+# the cached option for this configure run only, so unsetting it restores the
+# cached value (OFF unless set with -D).
+if(DEFINED ENV{FFMPEGKIT_DISABLE_ASLR})
+  set(FFMPEGKIT_DISABLE_ASLR "$ENV{FFMPEGKIT_DISABLE_ASLR}")
+endif()
+
+# Bundle layout revision, recorded in the marker so build trees unpacked by an
+# older plugin re-fetch once. 2: the archive carries LICENSES/. 3: the DLLs are
+# no longer patched in place, so trees holding patched copies get fresh ones.
+string(APPEND FFMPEGKIT_WANT " layout=3")
+if(FFMPEGKIT_DISABLE_ASLR)
+  # The workaround rewrites the DLLs in place, so toggling it must re-fetch.
+  string(APPEND FFMPEGKIT_WANT " aslr=off")
+endif()
 set(FFMPEGKIT_HAVE "")
 if(EXISTS "${FFMPEGKIT_MARKER}")
   file(READ "${FFMPEGKIT_MARKER}" FFMPEGKIT_HAVE)
@@ -127,7 +146,7 @@ if(EXISTS "${FFMPEGKIT_MARKER}")
 endif()
 
 if(NOT "${FFMPEGKIT_HAVE}" STREQUAL "${FFMPEGKIT_WANT}")
-  file(REMOVE_RECURSE "${FFMPEGKIT_PREBUILT_DIR}/bin")
+  file(REMOVE_RECURSE "${FFMPEGKIT_PREBUILT_DIR}/bin" "${FFMPEGKIT_PREBUILT_DIR}/LICENSES")
   file(MAKE_DIRECTORY "${FFMPEGKIT_PREBUILT_DIR}")
   if(FFMPEGKIT_LOCAL_DIR)
     if(NOT EXISTS "${FFMPEGKIT_LOCAL_DIR}/bin/libffmpegkit.dll")
@@ -138,6 +157,9 @@ if(NOT "${FFMPEGKIT_HAVE}" STREQUAL "${FFMPEGKIT_WANT}")
     if(EXISTS "${FFMPEGKIT_LOCAL_DIR}/include")
       file(REMOVE_RECURSE "${FFMPEGKIT_PREBUILT_DIR}/include")
       file(COPY "${FFMPEGKIT_LOCAL_DIR}/include" DESTINATION "${FFMPEGKIT_PREBUILT_DIR}")
+    endif()
+    if(EXISTS "${FFMPEGKIT_LOCAL_DIR}/LICENSES")
+      file(COPY "${FFMPEGKIT_LOCAL_DIR}/LICENSES" DESTINATION "${FFMPEGKIT_PREBUILT_DIR}")
     endif()
   else()
     message(STATUS "FFmpegKit: downloading ${FFMPEGKIT_PACKAGE} from ${FFMPEGKIT_DOWNLOAD_URL}")
@@ -176,27 +198,52 @@ if(NOT FFMPEGKIT_DLLS)
   message(FATAL_ERROR "FFmpegKit: no DLLs found in ${FFMPEGKIT_PREBUILT_DIR}/bin")
 endif()
 
-# MinGW-compiled DLLs ship with HIGH_ENTROPY_VA + DYNAMIC_BASE enabled and
-# many share the same preferred ImageBase (0x180000000). When ASLR is on, or
-# when overlapping DLLs force the loader to rebase, modules land far apart
-# in 64-bit address space and MinGW's 32-bit pseudo-relocations overflow.
+# The bundled DLLs keep DYNAMIC_BASE and HIGH_ENTROPY_VA. MinGW patches each
+# reference to another DLL's data at load time (a runtime pseudo-relocation),
+# and a 32-bit one overflows once the two DLLs load more than 2 GB apart. Every
+# pseudo-relocation in the published bundles is 64-bit, so they work at any
+# load address and need no rebasing.
 #
-# Fix: clear ASLR flags and rebase every DLL into a compact, non-overlapping
-# range starting at 0x10000000 so pseudo-relocs stay within +-2GB.
-get_filename_component(MSVC_TOOLS_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
-find_program(EDITBIN_EXECUTABLE editbin HINTS "${MSVC_TOOLS_DIR}" REQUIRED)
+# Earlier versions rebased every DLL below 4 GB and turned ASLR off to guard
+# against that overflow. FFMPEGKIT_DISABLE_ASLR keeps the workaround for a
+# self-built bundle (FFMPEGKIT_LOCAL_DIR) that does contain 32-bit ones.
+if(FFMPEGKIT_DISABLE_ASLR)
+  get_filename_component(MSVC_TOOLS_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  find_program(EDITBIN_EXECUTABLE editbin HINTS "${MSVC_TOOLS_DIR}" REQUIRED)
 
-add_custom_command(
-    OUTPUT "${FFMPEGKIT_PREBUILT_DIR}/bin/.high_entropy_patched"
-    COMMAND "${EDITBIN_EXECUTABLE}" /NOLOGO /HIGHENTROPYVA:NO /DYNAMICBASE:NO /REBASE:BASE=0x10000000 ${FFMPEGKIT_DLLS}
-    COMMAND ${CMAKE_COMMAND} -E touch "${FFMPEGKIT_PREBUILT_DIR}/bin/.high_entropy_patched"
-    DEPENDS ${FFMPEGKIT_DLLS}
-    COMMENT "Patching MinGW FFmpegKit DLLs (ASLR off + rebase)"
-)
-add_custom_target(patch_ffmpegkit_dlls DEPENDS "${FFMPEGKIT_PREBUILT_DIR}/bin/.high_entropy_patched")
-add_dependencies(${PLUGIN_NAME} patch_ffmpegkit_dlls)
+  add_custom_command(
+      OUTPUT "${FFMPEGKIT_PREBUILT_DIR}/bin/.high_entropy_patched"
+      COMMAND "${EDITBIN_EXECUTABLE}" /NOLOGO /HIGHENTROPYVA:NO /DYNAMICBASE:NO /REBASE:BASE=0x10000000 ${FFMPEGKIT_DLLS}
+      COMMAND ${CMAKE_COMMAND} -E touch "${FFMPEGKIT_PREBUILT_DIR}/bin/.high_entropy_patched"
+      DEPENDS ${FFMPEGKIT_DLLS}
+      COMMENT "Patching MinGW FFmpegKit DLLs (ASLR off + rebase)"
+  )
+  add_custom_target(patch_ffmpegkit_dlls DEPENDS "${FFMPEGKIT_PREBUILT_DIR}/bin/.high_entropy_patched")
+  add_dependencies(${PLUGIN_NAME} patch_ffmpegkit_dlls)
+endif()
 
 set(ffmpeg_kit_flutter_new_min_bundled_libraries
   ${FFMPEGKIT_DLLS}
   PARENT_SCOPE
 )
+
+# Ship the bundle's license notices (FFmpeg, FFmpegKit and every third-party
+# DLL above) with the app, in licenses/<package>/ next to the executable.
+# The runner only points CMAKE_INSTALL_PREFIX at its output directory after the
+# plugins are added, and a relative DESTINATION would be joined to that
+# unevaluated generator expression, so on a fresh build tree target the
+# runner's output directory directly, the same way the runner does.
+if(EXISTS "${FFMPEGKIT_PREBUILT_DIR}/LICENSES")
+  if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT AND DEFINED BINARY_NAME)
+    set(FFMPEGKIT_LICENSES_DEST "$<TARGET_FILE_DIR:${BINARY_NAME}>")
+  else()
+    set(FFMPEGKIT_LICENSES_DEST "${CMAKE_INSTALL_PREFIX}")
+  endif()
+  install(DIRECTORY "${FFMPEGKIT_PREBUILT_DIR}/LICENSES/"
+    DESTINATION "${FFMPEGKIT_LICENSES_DEST}/licenses/${PROJECT_NAME}"
+    COMPONENT Runtime)
+else()
+  message(WARNING "FFmpegKit: the bundle has no LICENSES/ directory, so no "
+    "license notices are installed with the app. Ship the FFmpeg and "
+    "third-party DLL notices yourself.")
+endif()

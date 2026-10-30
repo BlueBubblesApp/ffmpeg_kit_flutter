@@ -1,3 +1,30 @@
+## 3.6.7
+
+* **Fixed: macOS release builds and App Store archives failed at code signing (#170).** The prebuilt 8.1.1 and 8.1.2 iOS and macOS framework zips on the GitHub releases, which versions 3.4.0 to 3.6.6 download, contained macOS metadata files (`._*` AppleDouble files) inside every framework. `codesign` refuses to sign a macOS framework with extra files in its root, so macOS builds through CocoaPods failed at the app's CodeSign step with `code object is not signed at all` and `In subcomponent: .../<one of the frameworks>.framework`. iOS builds through CocoaPods still worked, but the files were copied into the app and sealed into its signature. macOS builds that use Swift Package Manager were not affected.
+* The release zips have been repacked without those files. Everything else in them is byte-identical, so those versions work once the frameworks are downloaded again: delete `<pub-cache>/hosted/pub.dev/ffmpeg_kit_flutter_new_min-<version>/macos/Frameworks` (and `ios/Frameworks`), then run `flutter clean` and `flutter build macos --release` (or `ios`) before archiving in Xcode. After `flutter clean`, `flutter pub get` and `pod install` alone are not enough for an Xcode archive. Upgrading to this version also downloads the frameworks fresh, on the next `flutter build`. `scripts/setup_macos.sh` and `scripts/setup_ios.sh` now also delete `._*` files after unzipping, so a zip like that can no longer break a build.
+* **Fixed: iOS and macOS crashed with `-[NSNull allKeys]` when the font name map was omitted (#167).** Calling `FFmpegKitConfig.setFontDirectory` or `setFontDirectoryList` without the optional map, or with `null`, aborted the app. Omitting it now behaves like passing an empty map. No changes to the native libraries.
+* Maintainers: new `scripts/check_apple_zip.sh`, a release gate for the Apple framework zips. It rejects `._*` and `__MACOSX` entries, missing frameworks and wrong bundle layouts, and checks that the frameworks sign the way CocoaPods and Xcode sign them. `scripts/build_spm_artifacts.sh` now strips `._*` files, runs that gate on the frameworks it packages, zips without extended attributes, and fails if a packed xcframework zip still has `._*` or `__MACOSX` entries.
+* Tests: `scripts/tests/test_apple_setup.sh` is an offline regression test that runs the real setup scripts on zips packed the way the affected ones were (#170). `example/integration_test/font_directory_test.dart` calls both methods with and without a map and checks the `fonts.conf` they write (#167).
+
+## 3.6.6
+
+* **Android: the plugin no longer applies the Kotlin Gradle Plugin (#168, #171).** The plugin's Android code is Java only, so `android/build.gradle` no longer applies `kotlin-android` or adds the Kotlin Gradle Plugin to its build script. This removes Flutter's warning that the plugin applies the Kotlin Gradle Plugin (KGP), and fixes the build failure `Failed to apply plugin 'kotlin-android'` in apps that use Android Gradle Plugin 9 with built-in Kotlin (`android.builtInKotlin=true`). Apps on Android Gradle Plugin 8 are unaffected. No changes to the plugin's API or native libraries.
+* README: the Android minimum no longer lists a Kotlin version, since the plugin no longer uses Kotlin.
+
+## 3.6.5
+
+* **Android: corrected Maven metadata.** The plugin now depends on `com.antonkarpenko:ffmpeg-kit-min:2.2.3`. Its native libraries are byte-identical to the previous release (FFmpeg n8.1.2); only the POM changed. The POM no longer describes the libraries as "FFmpeg v8.1.1", and its project and SCM URLs point to the real source repository. No other changes.
+
+## 3.6.4
+
+* **Windows: the bundled DLLs keep ASLR.** Earlier versions ran `editbin` on every bundled DLL to turn off address space layout randomization (`DYNAMIC_BASE`, `HIGH_ENTROPY_VA`) and rebase it below 4 GB. That guarded against MinGW 32-bit pseudo-relocations overflowing when DLLs load far apart, but the published 8.1.2 bundles contain no 32-bit pseudo-relocations, so the DLLs are now shipped exactly as built. Builds also no longer need MSVC's `editbin`. Existing build directories download the bundle once more to replace the previously patched copies.
+* If you build against your own bundle (`FFMPEGKIT_LOCAL_DIR`) and need the old behaviour, set `FFMPEGKIT_DISABLE_ASLR=ON`, either as an environment variable before `flutter build windows` or as a CMake cache variable.
+
+## 3.6.3
+
+* **Windows: the app now ships the native libraries' license notices.** The prebuilt FFmpeg 8.1.2 Windows bundle now includes `LICENSES/`, covering FFmpeg, FFmpegKit and every bundled third-party DLL with a link to its exact source. The plugin installs it into `licenses/ffmpeg_kit_flutter_new_min/` next to your executable. Existing build directories download the bundle once more to pick it up. The DLLs themselves are unchanged.
+* **Fixed: native errors bypassed the plugin's error handling.** The async API methods returned the platform call from inside their `try` block without awaiting it, so a `PlatformException` from the native side skipped the `catch` and reached your code unwrapped. They now await it, and these failures arrive as the documented `"<method> failed."` error. If you were catching `PlatformException` from these methods, catch the returned error instead.
+
 ## 3.6.2
 
 * **Fixed: Windows build failure `Cannot extract through symlink ... .plugin_symlinks` (#165).** The prebuilt FFmpeg archive was unpacked into the plugin's own source directory. For a package resolved from the pub cache that directory is reached through a symlink, and the extractor refuses to write through it. The archive now unpacks into the application's build directory instead.
